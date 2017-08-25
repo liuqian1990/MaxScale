@@ -723,44 +723,6 @@ gw_read_and_write(DCB *dcb)
 
     MySQLProtocol *proto = (MySQLProtocol *)dcb->protocol;
 
-    if (proto->ignore_reply)
-    {
-
-        /** The reply to a COM_CHANGE_USER is in packet */
-        GWBUF *query = proto->stored_query;
-        proto->stored_query = NULL;
-        proto->ignore_reply = false;
-        GWBUF* reply = modutil_get_next_MySQL_packet(&read_buffer);
-        ss_dassert(reply);
-        ss_dassert(read_buffer == NULL);
-        uint8_t result = GWBUF_DATA(reply)[4];
-
-        int rval = 0;
-
-        if (result == MYSQL_REPLY_OK)
-        {
-            rval = query ? dcb->func.write(dcb, query) : 1;
-        }
-        else
-        {
-             if (result == MYSQL_REPLY_ERR)
-             {
-                 /** The COM_CHANGE USER failed, generate a fake hangup event to
-                  * close the DCB and send an error to the client. */
-                 log_error_response(dcb, reply);
-             }
-             else
-             {
-                 MXS_ERROR("Unknown response to COM_CHANGE_USER: 0x%02hhx", result);
-             }
-            gwbuf_free(query);
-            poll_fake_hangup_event(dcb);
-        }
-
-        gwbuf_free(reply);
-        return rval;
-    }
-
     do
     {
         GWBUF *stmt = NULL;
@@ -895,47 +857,6 @@ static int gw_MySQLWrite_backend(DCB *dcb, GWBUF *queue)
     int rc = 0;
 
     CHK_DCB(dcb);
-
-    if (dcb->was_persistent && dcb->state == DCB_STATE_POLLING &&
-        backend_protocol->protocol_auth_state == MXS_AUTH_STATE_COMPLETE)
-    {
-        ss_dassert(dcb->persistentstart == 0);
-        ss_dassert(!MYSQL_IS_COM_QUIT(GWBUF_DATA(queue)));
-        /**
-         * This is a DCB that was just taken out of the persistent connection pool.
-         * We need to sent a COM_CHANGE_USER query to the backend to reset the
-         * session state.
-         */
-        if (backend_protocol->stored_query)
-        {
-            /** It is possible that the client DCB is closed before the COM_CHANGE_USER
-             * response is received. */
-            gwbuf_free(backend_protocol->stored_query);
-        }
-        dcb->was_persistent = false;
-        backend_protocol->ignore_reply = true;
-        backend_protocol->stored_query = queue;
-
-        GWBUF *buf = gw_create_change_user_packet(dcb->session->client_dcb->data, dcb->protocol);
-        return dcb_write(dcb, buf) ? 1 : 0;
-    }
-    else if (backend_protocol->ignore_reply)
-    {
-        if (MYSQL_IS_COM_QUIT((uint8_t*)GWBUF_DATA(queue)))
-        {
-            gwbuf_free(queue);
-        }
-        else
-        {
-            /**
-             * We're still waiting on the reply to the COM_CHANGE_USER, append the
-             * buffer to the stored query. This is possible if the client sends
-             * BLOB data on the first command.
-             */
-            backend_protocol->stored_query = gwbuf_append(backend_protocol->stored_query, queue);
-        }
-        return 1;
-    }
 
     /**
      * Pick action according to state of protocol.
